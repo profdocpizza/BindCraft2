@@ -98,6 +98,10 @@ def supported_attention_backend(requested: str='auto') -> str:
 def cuequivariance_available() -> bool:
     try:
         import cuequivariance_jax  # noqa: F401
+        #cuequivariance's triangle kernels import triton inside the kernel call, so a host with
+        #cuequivariance_jax but no triton used to start a campaign, compile, and die seconds into the
+        #first trajectory. Probing for it here makes use_cueq fall back the way attention_backend does.
+        import triton  # noqa: F401
     except Exception:
         return False
     return True
