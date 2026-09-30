@@ -33,7 +33,7 @@ MODALITY_SWITCH_AXES = {'forced_targeting': 'forced_targeting_shell'}
 AXIS_DEFAULTS = {'forced_targeting_shell': EPITOPE_CUTOFF}
 DEFAULT_SWEEP_AXES = ('weights_binder_helicity', 'weights_interface_contacts', 'weights_compactness', 'weights_binder_pae', 'weights_interface_pae')
 AXIS_SWEEP_VALUES = {'weights_binder_helicity': (-0.6, 0.3)}
-SHARED_MODEL_SETTINGS = ('design_models', 'validation_models', 'validation_model', 'design_recycles', 'validation_recycles', 'subbatch_size', 'attention_backend', 'use_cueq', 'length_bucket_size', 'cyclic_offset_mode', 'cyclize_peptide', 'mpnn_model', 'mpnn_variant', 'aa_bias', 'copies', 'oligomer_tie')
+SHARED_MODEL_SETTINGS = ('design_models', 'validation_models', 'validation_model', 'design_recycles', 'validation_recycles', 'subbatch_size', 'attention_backend', 'use_cueq', 'mpnn_target_charge', 'mpnn_charge_tolerance', 'mpnn_charge_lambda_max', 'length_bucket_size', 'cyclic_offset_mode', 'cyclize_peptide', 'mpnn_model', 'mpnn_variant', 'aa_bias', 'copies', 'oligomer_tie')
 
 def parameter_sweep_options(settings: dict) -> dict | None:
     configured = settings.get('parameter_sweep')

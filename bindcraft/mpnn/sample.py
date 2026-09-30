@@ -4,6 +4,7 @@ import haiku as hk
 import numpy as np
 
 from .utils import cat_neighbors_nodes, get_ar_mask
+from .constraints import charge_commit, charge_logit_delta, charge_state
 
 class mpnn_sample:
   def sample(self, I):
@@ -20,12 +21,14 @@ class mpnn_sample:
          'ar_mask' = (L,L)
          'bias' = (L,21)
          'temperature' = 1.0
+         'charge' = {'target','tolerance','lambda_max','values','schedule'}, see mpnn/constraints.py
         }
     """
 
     key = hk.next_rng_key()
     L = I["X"].shape[0]
     temperature = I.get("temperature",1.0)
+    constraint = I.get("charge")
 
     # prepare node and edge embeddings
     E, E_idx = self.features(I)
@@ -51,7 +54,7 @@ class mpnn_sample:
     h_EXV_encoder = cat_neighbors_nodes(h_V, h_EX_encoder, E_idx)
     h_EXV_encoder = mask_fw[...,None] * h_EXV_encoder
 
-    def fwd(x, t, key):
+    def fwd(x, t, key, charge_step=None):
       h_EXV_encoder_t = h_EXV_encoder[t] 
       E_idx_t         = E_idx[t]
       mask_t          = I["mask"][t]
@@ -81,9 +84,19 @@ class mpnn_sample:
 
       # one gumbel draw for the whole tied group, as upstream ProteinMPNN tied_sample does; averaging
       # a draw per state shrinks it by sqrt(N) and quietly lowers the sampling temperature.
-      logits_t = logits_t.mean(0, keepdims=True)/temperature + jax.random.gumbel(key, (1, logits_t.shape[-1]))
+      sampling_logits = logits_t.mean(0, keepdims=True)/temperature
+
+      # net-charge control, on the sampling-scale logits so the lookahead stays a likelihood reweighting
+      if constraint is not None:
+        charge_delta, x["charge_state"] = charge_logit_delta(x["charge_state"], charge_step, sampling_logits, constraint)
+        sampling_logits = sampling_logits + charge_delta
+
+      logits_t = sampling_logits + jax.random.gumbel(key, (1, logits_t.shape[-1]))
 
       S_t = jax.nn.one_hot(logits_t[...,:20].argmax(-1), 21)
+
+      if constraint is not None:
+        x["charge_state"] = charge_commit(x["charge_state"], charge_step, S_t[0], constraint["values"])
 
       # update
       x["h_S"] = x["h_S"].at[t].set(self.W_s(S_t))
@@ -95,11 +108,15 @@ class mpnn_sample:
          "h_V":    jnp.array([h_V] + [jnp.zeros_like(h_V)] * len(self.decoder_layers)),
          "S":      jnp.zeros((L,21)),
          "logits": jnp.zeros((L,21))}
-
+    if constraint is not None: X["charge_state"] = charge_state()
+    
     # scan over decoding order
     t = I["decoding_order"]
     if t.ndim == 1: t = t[:,None]
     XS = {"t":t, "key":jax.random.split(key,t.shape[0])}
-    X = hk.scan(lambda x, xs: fwd(x, xs["t"], xs["key"]), X, XS)[0]
+    if constraint is not None: XS["charge"] = constraint["schedule"]
+    X = hk.scan(lambda x, xs: fwd(x, xs["t"], xs["key"], xs.get("charge")), X, XS)[0]
     
-    return {"S":X["S"], "logits":X["logits"], "decoding_order":t}
+    out = {"S":X["S"], "logits":X["logits"], "decoding_order":t}
+    if constraint is not None: out["charge"] = X["charge_state"]["charge"]
+    return out

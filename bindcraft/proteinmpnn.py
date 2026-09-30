@@ -9,6 +9,7 @@ from bindcraft.prediction import ProteinPredictor, CompiledModelCache, residue_c
 from bindcraft.model_weights import MPNN_WEIGHT_VARIANTS, mpnn_variant_directory
 from bindcraft.af2 import DEFAULT_LENGTH_BUCKET, padded_prediction_complex
 from bindcraft.mpnn.modules import ProteinMPNN
+from bindcraft.mpnn.constraints import DEFAULT_CHARGE_LAMBDA_MAX, charge_schedule, charge_values, designed_chain_scope, scope_charge_bounds, uncharged_amino_acid_missing
 from bindcraft.sequence_optimization import OMITTED_AMINO_ACID_LOGIT
 from bindcraft.protein import AMINO_ACIDS, ATOM_NAMES, StructurePrediction, StructurePredictions, Protein, ResidueFlags, ProteinStates, has_residue_flag, has_resolved_atom
 
@@ -28,20 +29,42 @@ def sequence_to_mpnn_alphabet(sequence_values: Array) -> Array:
 def sequence_from_mpnn_alphabet(sequence_values: Array) -> Array:
     return sequence_values[..., _FROM_MPNN]
 
-def proteinmpnn_input_features(atoms: Array, resolved_residue_mask: Array, residue_index: Array, chain_indices: Array, fixed_residue_mask: Array, sequence: Array, temperature: Array, key: Array, tied_residue_groups: Array | None=None, redesigned_amino_acid_bias: Array | None=None) -> dict[str, Array]:
-    decoding_priorities = jax.random.uniform(key, resolved_residue_mask.shape)
-    decoding_priorities = jnp.where(resolved_residue_mask.astype(bool), decoding_priorities, decoding_priorities + 1)
-    decoding_priorities = jnp.where(fixed_residue_mask, decoding_priorities - 1, decoding_priorities)
+def mpnn_sequence_bias(fixed_residue_mask: Array, sequence: Array, redesigned_amino_acid_bias: Array | None, temperature: Array) -> Array:
     #the sampler divides the summed logits by temperature, so an unscaled bias arrives as log(w)/temperature and a
     #propensity of 0.3 lands as 0.3**10; scaling by the temperature here leaves exactly the log-odds shift asked for
     redesigned_sequence_bias = 0.0 if redesigned_amino_acid_bias is None else sequence_to_mpnn_alphabet(redesigned_amino_acid_bias) * temperature
-    sequence_bias = jnp.where(fixed_residue_mask[:, None], 10000000.0 * sequence_to_mpnn_alphabet(sequence), redesigned_sequence_bias)
+    return jnp.where(fixed_residue_mask[:, None], 10000000.0 * sequence_to_mpnn_alphabet(sequence), redesigned_sequence_bias)
+
+def charge_constraint_arrays(chain_indices: Array, resolved_residue_mask: Array, fixed_residue_mask: Array, sequence: Array, sequence_bias: Array, temperature: Array) -> tuple[Array, Array, Array, Array]:
+    """Scope, designed positions, native charges and allowed alphabets the charge controller reads."""
+    designed = resolved_residue_mask * jnp.logical_not(fixed_residue_mask).astype(resolved_residue_mask.dtype)
+    scope = designed_chain_scope(chain_indices, resolved_residue_mask, designed)
+    native_charge = (sequence_to_mpnn_alphabet(sequence) * charge_values()).sum(-1)
+    allowed_amino_acids = (sequence_bias > OMITTED_AMINO_ACID_LOGIT * temperature / 2).astype(jnp.float32)
+    return (scope, designed, native_charge, allowed_amino_acids)
+
+def charge_constraint_inputs(decoding_order: Array, chain_indices: Array, resolved_residue_mask: Array, fixed_residue_mask: Array, sequence: Array, sequence_bias: Array, temperature: Array, charge_constraint: dict) -> dict:
+    scope, designed, native_charge, allowed_amino_acids = charge_constraint_arrays(chain_indices, resolved_residue_mask, fixed_residue_mask, sequence, sequence_bias, temperature)
+    values = charge_values()
+    return {'target': jnp.asarray(charge_constraint['target'], dtype=jnp.float32), 'tolerance': jnp.asarray(charge_constraint['tolerance'], dtype=jnp.float32),
+            'lambda_max': jnp.asarray(charge_constraint['lambda_max'], dtype=jnp.float32), 'values': values,
+            'schedule': charge_schedule(decoding_order, scope, designed, native_charge, allowed_amino_acids, values)}
+
+def proteinmpnn_input_features(atoms: Array, resolved_residue_mask: Array, residue_index: Array, chain_indices: Array, fixed_residue_mask: Array, sequence: Array, temperature: Array, key: Array, tied_residue_groups: Array | None=None, redesigned_amino_acid_bias: Array | None=None, charge_constraint: dict | None=None) -> dict[str, Array]:
+    decoding_priorities = jax.random.uniform(key, resolved_residue_mask.shape)
+    decoding_priorities = jnp.where(resolved_residue_mask.astype(bool), decoding_priorities, decoding_priorities + 1)
+    decoding_priorities = jnp.where(fixed_residue_mask, decoding_priorities - 1, decoding_priorities)
+    sequence_bias = mpnn_sequence_bias(fixed_residue_mask, sequence, redesigned_amino_acid_bias, temperature)
     features = {'X': atoms[:, _BACKBONE_ATOMS, :].astype(jnp.float32), 'mask': resolved_residue_mask, 'residue_idx': residue_index, 'chain_idx': chain_indices, 'bias': sequence_bias, 'temperature': temperature}
     if tied_residue_groups is None:
-        return {**features, 'decoding_order': decoding_priorities.argsort()}
-    decoding_order = tied_residue_groups[decoding_priorities[tied_residue_groups[:, 0]].argsort()]
-    decoding_step = jnp.zeros(resolved_residue_mask.shape, dtype=jnp.int32).at[decoding_order].set(jnp.arange(decoding_order.shape[0], dtype=jnp.int32)[:, None])
-    return {**features, 'decoding_order': decoding_order, 'ar_mask': (decoding_step[:, None] > decoding_step[None, :]).astype(jnp.float32)}
+        features = {**features, 'decoding_order': decoding_priorities.argsort()}
+    else:
+        decoding_order = tied_residue_groups[decoding_priorities[tied_residue_groups[:, 0]].argsort()]
+        decoding_step = jnp.zeros(resolved_residue_mask.shape, dtype=jnp.int32).at[decoding_order].set(jnp.arange(decoding_order.shape[0], dtype=jnp.int32)[:, None])
+        features = {**features, 'decoding_order': decoding_order, 'ar_mask': (decoding_step[:, None] > decoding_step[None, :]).astype(jnp.float32)}
+    if charge_constraint is None:
+        return features
+    return {**features, 'charge': charge_constraint_inputs(features['decoding_order'], chain_indices, resolved_residue_mask, fixed_residue_mask, sequence, sequence_bias, temperature, charge_constraint)}
 
 def tied_chain_residue_groups(chain_names: tuple[str, ...], chain_lengths: tuple[int, ...], chain_groups: tuple[tuple[str, ...], ...]) -> tuple[tuple[int, ...], ...]:
     chain_offsets, residue_count = {}, 0
@@ -65,13 +88,16 @@ def read_mpnn_checkpoint(path: str) -> tuple[dict[str, dict[str, np.ndarray]], i
 
 
 class ProteinMPNNSequenceModel(ProteinPredictor):
-    def __init__(self, data_dir: str, model_name: str='v_48_020', temperature: float=0.1, key: Array | None=None, max_cache_size: int=8, variant: str='neutral', omitted_amino_acids: str='', amino_acid_bias: dict[str, float] | None=None, multi_chain_binders: tuple[tuple[str, ...], ...]=(), length_bucket_size: int=DEFAULT_LENGTH_BUCKET, target_pad_length: int=0):
+    def __init__(self, data_dir: str, model_name: str='v_48_020', temperature: float=0.1, key: Array | None=None, max_cache_size: int=8, variant: str='neutral', omitted_amino_acids: str='', amino_acid_bias: dict[str, float] | None=None, multi_chain_binders: tuple[tuple[str, ...], ...]=(), length_bucket_size: int=DEFAULT_LENGTH_BUCKET, target_pad_length: int=0, target_charge: float | None=None, charge_tolerance: float=0.0, charge_lambda_max: float=DEFAULT_CHARGE_LAMBDA_MAX):
         self.model_name = model_name
         self.variant = variant
         self.length_bucket_size = length_bucket_size
         self.target_pad_length = target_pad_length
         self.multi_chain_binders = multi_chain_binders
         self.temperature = temperature
+        self.target_charge = None if target_charge is None else float(target_charge)
+        self.charge_tolerance = abs(float(charge_tolerance))
+        self.charge_lambda_max = float(charge_lambda_max)
         self.key = jax.random.PRNGKey(0) if key is None else key
         amino_acid_bias = amino_acid_bias or {}
         self.redesigned_amino_acid_bias = jnp.asarray([OMITTED_AMINO_ACID_LOGIT if amino_acid in omitted_amino_acids else amino_acid_bias.get(amino_acid, 0.0) for amino_acid in AMINO_ACIDS], dtype=jnp.float32)
@@ -86,6 +112,25 @@ class ProteinMPNNSequenceModel(ProteinPredictor):
         self.mpnn_sampler = hk.transform(sample_backbone_sequence)
         self.prediction_compile_cache = CompiledModelCache(max_cache_size)
 
+    def charge_constraint(self) -> dict | None:
+        """The net-charge budget the sampler decodes under, or None when no target is set."""
+        if self.target_charge is None:
+            return None
+        return {'target': self.target_charge, 'tolerance': self.charge_tolerance, 'lambda_max': self.charge_lambda_max}
+
+    def _refuse_unreachable_charge(self, chain_indices: Array, atom_mask: Array, sequence: Array, fixed_residue_mask: Array) -> None:
+        """A budget outside what the designed positions can reach is refused here, not missed silently at the end."""
+        resolved_ca_mask = has_resolved_atom(atom_mask, 'CA').astype(jnp.float32)
+        temperature = jnp.asarray(self.temperature, dtype=jnp.float32)
+        sequence_bias = mpnn_sequence_bias(fixed_residue_mask, sequence, self.redesigned_amino_acid_bias, temperature)
+        scope, designed, native_charge, allowed_amino_acids = charge_constraint_arrays(chain_indices, resolved_ca_mask, fixed_residue_mask, sequence, sequence_bias, temperature)
+        values = charge_values()
+        if uncharged_amino_acid_missing(allowed_amino_acids, values, scope * designed):
+            raise ValueError('mpnn_target_charge needs an uncharged amino acid left at every designed position; the bias or omissions in force remove them all somewhere, which leaves charges the controller cannot reach')
+        lowest, highest, designed_count = scope_charge_bounds(scope, designed, native_charge, allowed_amino_acids, values)
+        if lowest > self.target_charge + self.charge_tolerance or highest < self.target_charge - self.charge_tolerance:
+            raise ValueError(f'mpnn_target_charge {self.target_charge:g} +-{self.charge_tolerance:g} is unreachable: {designed_count} designed position(s) over the designed chains reach a net charge of {lowest:g} to {highest:g}')
+
     def _compiled_complex_prediction(self, chain_lengths: tuple[int, ...], tied_residue_groups: tuple=()) -> Callable:
         cache_key = chain_lengths, tied_residue_groups
         compiled_sequence_prediction = self.prediction_compile_cache.get(cache_key)
@@ -94,7 +139,7 @@ class ProteinMPNNSequenceModel(ProteinPredictor):
             grouped_residues = jnp.asarray(tied_residue_groups, dtype=jnp.int32) if tied_residue_groups else None
             def predict_mpnn_sequence(model_parameters: Array, key: Array, atoms: Array, atom_mask: Array, residue_index: Array, sequence: Array, fixed_residue_mask: Array, temperature: Array):
                 resolved_ca_mask = has_resolved_atom(atom_mask, 'CA').astype(jnp.float32)
-                mpnn_inputs = proteinmpnn_input_features(atoms, resolved_ca_mask, residue_index, chain_indices, fixed_residue_mask, sequence, temperature, key, grouped_residues, self.redesigned_amino_acid_bias)
+                mpnn_inputs = proteinmpnn_input_features(atoms, resolved_ca_mask, residue_index, chain_indices, fixed_residue_mask, sequence, temperature, key, grouped_residues, self.redesigned_amino_acid_bias, self.charge_constraint())
                 mpnn_prediction = self.mpnn_sampler.apply(model_parameters, key, mpnn_inputs)
                 sampled_amino_acids = sequence_from_mpnn_alphabet(mpnn_prediction['S'])[..., :20].argmax(-1)
                 amino_acid_log_probabilities = jax.nn.log_softmax(sequence_from_mpnn_alphabet(mpnn_prediction['logits']), axis=-1)[..., :20]
@@ -137,6 +182,8 @@ class ProteinMPNNSequenceModel(ProteinPredictor):
         atoms, atom_mask, residue_index, flags = chain_arrays['atoms'], chain_arrays['atom_mask'], chain_arrays['residue_index'], chain_arrays['flags']
         sequence = chain_arrays['sequence'].astype(jnp.float32)
         fixed_residue_mask = jnp.logical_not(has_residue_flag(flags, ResidueFlags.DESIGN))
+        if self.target_charge is not None:
+            self._refuse_unreachable_charge(residue_chain_ids(chain_lengths), atom_mask, sequence, fixed_residue_mask)
         self.key, *sampling_random_keys = jax.random.split(self.key, candidate_count + 1)
         compiled_sequence_prediction = self._compiled_complex_prediction(chain_lengths, tied_residue_groups or tied_chain_residue_groups(chain_names, chain_lengths, chain_groups or self.multi_chain_binders))
         updated_sequence, sequence_negative_log_likelihood, sequence_recovery = compiled_sequence_prediction(self.model_parameters, jnp.stack(sampling_random_keys), atoms, atom_mask, residue_index, sequence, fixed_residue_mask, jnp.asarray(self.temperature))

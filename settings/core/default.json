@@ -1,6 +1,9 @@
 {
   "mpnn_model": "v_48_020",
   "mpnn_variant": "negative",
+  "mpnn_target_charge": null,
+  "mpnn_charge_tolerance": 0,
+  "mpnn_charge_lambda_max": 8.0,
   "validation_recycles": 3,
   "validation_crop_flank": 5,
   "autotune": true,
