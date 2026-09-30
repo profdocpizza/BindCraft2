@@ -99,6 +99,11 @@ Conditioning at the charge the model already prefers costs about +0.04 nats per 
 shift about +0.07 to +0.10. The reference implementation's benchmark over 17 backbones reports the
 same magnitude (+0.06 nats at the preferred charge, rising with the size of the shift).
 
+(On three globular backbones of 54, 108 and 214 residues, 1056 of 1056 designs landed exactly on
+target, and the controller's own overhead above exact conditioning was 0.018 to 0.111 nats per
+residue, shrinking with chain length - the measurement, and how it separates the cost of the ask
+from the cost of the controller, is in [what the budget costs](charge-budget-benchmark.md).)
+
 Two things the table shows that are worth reading twice. The row with a fixed target chain has a
 much higher NLL (1.213) because the score averages over every resolved residue including the
 target's, not because the budget is expensive. And the tolerance rows land on the window edge

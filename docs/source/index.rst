@@ -53,4 +53,5 @@ Explore the documentation below to learn how BindCraft2 works, choose the right 
    outputs
    examples
    charge-budget
+   charge-budget-benchmark
 
