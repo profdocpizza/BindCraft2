@@ -144,6 +144,9 @@ Replace `<stage>` with any of the six stage names above. Presets can change stag
 | `redesign_interface` | false | Allow ProteinMPNN to change interface residues instead of holding the designed interface fixed. |
 | `mpnn_model` | `v_48_020` | Select the checkpoint filename stem in the chosen weight family. |
 | `mpnn_variant` | `negative` | Surface-charge preference: `neutral`, `negative` or `positive`. |
+| `mpnn_target_charge` | `null` | Net charge (`K+R minus D+E`, histidine neutral, termini excluded) every redesigned sequence must carry. Counted over the designed chains, fixed residues included. See [the charge budget](charge-budget.md). |
+| `mpnn_charge_tolerance` | 0 | Half-width of the accepted charge window; 0 asks for the exact value. |
+| `mpnn_charge_lambda_max` | 8.0 | Cap in logit units on the soft steering that precedes the hard reachability mask. |
 | `mpnn_fix_linker` | true | Preserve linker residues identified by a multidomain design during redesign. |
 | `domain_linker_fix_cut` | 0.5 | Membership threshold used to decide which linker residues are held. |
 

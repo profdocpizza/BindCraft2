@@ -2,6 +2,11 @@
 
 # BindCraft2
 
+> **This is a fork.** It tracks [PacesaLab/BindCraft2](https://github.com/PacesaLab/BindCraft2) and adds one
+> feature: `mpnn_target_charge` and `mpnn_charge_tolerance` make the ProteinMPNN redesign stage decode under a
+> net-charge budget, so every sequence it emits carries the charge you asked for. What it guarantees, what it
+> costs and what it does not claim: [docs/source/charge-budget.md](docs/source/charge-budget.md).
+
 **Design protein binders around the biology of your experiment.**
 
 BindCraft2 (BC2) brings de novo miniproteins, scaffolded binders, cyclic peptides and multistate design into one workflow. Describe your target, choose the kind of binder you want, and add properties that matter for your experiment. Named presets supply the design settings and acceptance filters; you can adjust individual settings when needed.
